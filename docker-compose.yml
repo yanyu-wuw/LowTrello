@@ -1,0 +1,79 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: lowtrello-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-lowtrello}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lowtrello}
+      POSTGRES_DB: ${POSTGRES_DB:-lowtrello}
+    ports:
+      - "5432:5432"
+    volumes:
+      - lowtrello_pgdata:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lowtrello -d lowtrello"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  api:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+      args:
+        NPM_REGISTRY: https://registry.npmmirror.com
+        HTTP_PROXY: ${HTTP_PROXY:-http://http.docker.internal:3128}
+        HTTPS_PROXY: ${HTTPS_PROXY:-http://http.docker.internal:3128}
+        NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,postgres,api,web}
+    container_name: lowtrello-api
+    environment:
+      NODE_ENV: production
+      PORT: 8787
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:8080}
+      JWT_SECRET: ${JWT_SECRET:-dev_change_me}
+      SMTP_HOST: ${SMTP_HOST:-mailhog}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_FROM: ${SMTP_FROM:-no-reply@lowtrello.local}
+      VERIFICATION_CODE_TTL_MINUTES: ${VERIFICATION_CODE_TTL_MINUTES:-10}
+      VERIFICATION_CODE_RESEND_SECONDS: ${VERIFICATION_CODE_RESEND_SECONDS:-60}
+      VERIFICATION_CODE_MAX_ATTEMPTS: ${VERIFICATION_CODE_MAX_ATTEMPTS:-5}
+      ACCESS_TOKEN_EXPIRES_IN: ${ACCESS_TOKEN_EXPIRES_IN:-15m}
+      REFRESH_TOKEN_DAYS: ${REFRESH_TOKEN_DAYS:-30}
+      REFRESH_TOKEN_COOKIE_NAME: ${REFRESH_TOKEN_COOKIE_NAME:-lowtrello_rt}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-2h}
+      PRISMA_DB_PUSH: ${PRISMA_DB_PUSH:-1}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://lowtrello:lowtrello@postgres:5432/lowtrello?schema=public}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mailhog:
+        condition: service_started
+    ports:
+      - "8787:8787"
+    restart: unless-stopped
+
+  mailhog:
+    image: mailhog/mailhog:v1.0.1
+    container_name: lowtrello-mailhog
+    ports:
+      - "8025:8025"
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NPM_REGISTRY: https://registry.npmmirror.com
+        HTTP_PROXY: ${HTTP_PROXY:-http://http.docker.internal:3128}
+        HTTPS_PROXY: ${HTTPS_PROXY:-http://http.docker.internal:3128}
+        NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,postgres,api,web}
+    container_name: lowtrello-web
+    depends_on:
+      - api
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+volumes:
+  lowtrello_pgdata:
