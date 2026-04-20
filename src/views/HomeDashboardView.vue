@@ -188,6 +188,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '../stores/user'
+import http from '../lib/http'
 import { loadFromStorage, saveToStorage } from '../utils/storage'
 
 const route = useRoute()
@@ -277,27 +278,7 @@ function formatRelativeTime(isoString) {
 }
 
 async function authedGetJson(url) {
-  const token = String(userStore.accessToken || '')
-  const doFetch = async (t) => {
-    return await fetch(url, {
-      method: 'GET',
-      credentials: 'include',
-      headers: {
-        Authorization: `Bearer ${t}`
-      }
-    })
-  }
-
-  let response = await doFetch(token)
-  if (response.status === 401) {
-    const refreshed = await userStore.refreshAccessToken()
-    if (refreshed) {
-      response = await doFetch(String(userStore.accessToken || ''))
-    }
-  }
-
-  if (response.ok) return await response.json()
-  throw new Error(`HTTP_${response.status}`)
+  return await http.authedJson(url)
 }
 
 async function loadRecent() {

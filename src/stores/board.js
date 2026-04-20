@@ -4,6 +4,7 @@ import { createId } from '../utils/id'
 import { loadFromStorage, loadString, saveString, saveToStorage } from '../utils/storage'
 import { normalizeBoardBackground } from '../utils/boardBackgrounds'
 import { useUserStore } from './user'
+import http from '../lib/http'
 
 const BOARDS_KEY = 'lowtrello.boards.v1'
 const CURRENT_BOARD_KEY = 'lowtrello.current_board_id.v1'
@@ -889,7 +890,7 @@ export const useBoardStore = defineStore('board', () => {
 
     remoteLoading.value = true
     try {
-      const data = await userStore.authedApiJson(`/api/workspaces/${workspaceId}/boards`)
+      const data = await http.authedJson(`/api/workspaces/${workspaceId}/boards`)
       const items = Array.isArray(data?.items) ? data.items : []
 
       // Bootstrap: keep UX consistent with the local prototype (at least 1 board).
@@ -906,8 +907,8 @@ export const useBoardStore = defineStore('board', () => {
             { id: createId('list'), title: localizedText('done'), position: 2 }
           ]
         }
-        await userStore.authedApiJson(`/api/workspaces/${workspaceId}/boards`, { method: 'POST', body: payload })
-        const again = await userStore.authedApiJson(`/api/workspaces/${workspaceId}/boards`)
+        await http.authedJson(`/api/workspaces/${workspaceId}/boards`, { method: 'POST', body: payload })
+        const again = await http.authedJson(`/api/workspaces/${workspaceId}/boards`)
         const nextItems = Array.isArray(again?.items) ? again.items : []
         boards.value = nextItems.map((b) => normalizeBoard(mergeBoardMeta(b)))
       } else {
@@ -952,8 +953,8 @@ export const useBoardStore = defineStore('board', () => {
         })
       })
 
-      userStore
-        .authedApiJson(`/api/boards/${targetBoard.id}/reorder`, {
+      http
+        .authedJson(`/api/boards/${targetBoard.id}/reorder`, {
           method: 'POST',
           body: { lists, cards }
         })
@@ -1437,8 +1438,8 @@ export const useBoardStore = defineStore('board', () => {
             }))
           : []
 
-        userStore
-          .authedApiJson(`/api/workspaces/${wid}/boards`, {
+        http
+          .authedJson(`/api/workspaces/${wid}/boards`, {
             method: 'POST',
             body: {
               id: nextBoard.id,
@@ -1542,7 +1543,7 @@ export const useBoardStore = defineStore('board', () => {
       if (payload.background && typeof payload.background === 'object') body.background = board.background
 
       if (Object.keys(body).length) {
-        userStore.authedApiJson(`/api/boards/${boardId}`, { method: 'PATCH', body }).catch(() => {})
+        http.authedJson(`/api/boards/${boardId}`, { method: 'PATCH', body }).catch(() => {})
       }
     }
   }
@@ -1561,8 +1562,8 @@ export const useBoardStore = defineStore('board', () => {
     persist()
 
     if (remoteEnabled.value) {
-      userStore
-        .authedApiJson(`/api/boards/${boardId}`, { method: 'DELETE' })
+      http
+        .authedJson(`/api/boards/${boardId}`, { method: 'DELETE' })
         .then(() => loadRemoteBoards())
         .catch(() => {})
     }
@@ -1592,8 +1593,8 @@ export const useBoardStore = defineStore('board', () => {
 
     if (remoteEnabled.value) {
       const position = Math.max(0, board.lists.length - 1)
-      userStore
-        .authedApiJson(`/api/boards/${boardId}/lists`, {
+      http
+        .authedJson(`/api/boards/${boardId}/lists`, {
           method: 'POST',
           body: { id: nextList.id, title: nextList.title, position }
         })
@@ -1654,8 +1655,8 @@ export const useBoardStore = defineStore('board', () => {
 
     if (remoteEnabled.value) {
       const position = Math.max(0, sourceIndex + 1)
-      userStore
-        .authedApiJson(`/api/boards/${boardId}/lists`, {
+      http
+        .authedJson(`/api/boards/${boardId}/lists`, {
           method: 'POST',
           body: {
             id: nextList.id,
@@ -1730,7 +1731,7 @@ export const useBoardStore = defineStore('board', () => {
     persist()
 
     if (remoteEnabled.value) {
-      userStore.authedApiJson(`/api/lists/${listId}`, { method: 'PATCH', body: { archived: true } }).catch(() => {})
+      http.authedJson(`/api/lists/${listId}`, { method: 'PATCH', body: { archived: true } }).catch(() => {})
     }
     return nextList
   }
@@ -1767,7 +1768,7 @@ export const useBoardStore = defineStore('board', () => {
     persist()
 
     if (remoteEnabled.value) {
-      userStore.authedApiJson(`/api/lists/${listId}`, { method: 'PATCH', body: { archived: false } }).catch(() => {})
+      http.authedJson(`/api/lists/${listId}`, { method: 'PATCH', body: { archived: false } }).catch(() => {})
     }
     return nextList
   }
@@ -1797,7 +1798,7 @@ export const useBoardStore = defineStore('board', () => {
     persist()
 
     if (remoteEnabled.value) {
-      userStore.authedApiJson(`/api/lists/${listId}`, { method: 'DELETE' }).catch(() => {})
+      http.authedJson(`/api/lists/${listId}`, { method: 'DELETE' }).catch(() => {})
     }
     return true
   }
@@ -1813,8 +1814,8 @@ export const useBoardStore = defineStore('board', () => {
     persist()
 
     if (remoteEnabled.value) {
-      userStore
-        .authedApiJson(`/api/lists/${listId}`, {
+      http
+        .authedJson(`/api/lists/${listId}`, {
           method: 'PATCH',
           body: { title: listResult.list.title }
         })
@@ -1833,7 +1834,7 @@ export const useBoardStore = defineStore('board', () => {
     persist()
 
     if (remoteEnabled.value) {
-      userStore.authedApiJson(`/api/lists/${listId}`, { method: 'DELETE' }).catch(() => {})
+      http.authedJson(`/api/lists/${listId}`, { method: 'DELETE' }).catch(() => {})
     }
   }
 
@@ -1873,8 +1874,8 @@ export const useBoardStore = defineStore('board', () => {
     persist()
 
     if (remoteEnabled.value) {
-      userStore
-        .authedApiJson(`/api/lists/${listId}/cards`, {
+      http
+        .authedJson(`/api/lists/${listId}/cards`, {
           method: 'POST',
           body: {
             id: nextCard.id,
@@ -1975,7 +1976,7 @@ export const useBoardStore = defineStore('board', () => {
       if (typeof payload.position === 'number') body.position = payload.position
 
       if (Object.keys(body).length) {
-        userStore.authedApiJson(`/api/cards/${cardId}`, { method: 'PATCH', body }).catch(() => {})
+        http.authedJson(`/api/cards/${cardId}`, { method: 'PATCH', body }).catch(() => {})
       }
     }
   }
@@ -2003,7 +2004,7 @@ export const useBoardStore = defineStore('board', () => {
     persist()
 
     if (remoteEnabled.value) {
-      userStore.authedApiJson(`/api/cards/${cardId}`, { method: 'DELETE' }).catch(() => {})
+      http.authedJson(`/api/cards/${cardId}`, { method: 'DELETE' }).catch(() => {})
     }
   }
 
@@ -2052,7 +2053,7 @@ export const useBoardStore = defineStore('board', () => {
     persist()
 
     if (remoteEnabled.value) {
-      userStore.authedApiJson(`/api/cards/${cardId}`, { method: 'PATCH', body: { archived: true } }).catch(() => {})
+      http.authedJson(`/api/cards/${cardId}`, { method: 'PATCH', body: { archived: true } }).catch(() => {})
     }
     return entry
   }
@@ -2121,8 +2122,8 @@ export const useBoardStore = defineStore('board', () => {
     persist()
 
     if (remoteEnabled.value) {
-      userStore
-        .authedApiJson(`/api/cards/${cardId}`, {
+      http
+        .authedJson(`/api/cards/${cardId}`, {
           method: 'PATCH',
           body: { archived: false, listId: targetList.id, position: 0 }
         })
@@ -2160,7 +2161,7 @@ export const useBoardStore = defineStore('board', () => {
     persist()
 
     if (remoteEnabled.value) {
-      userStore.authedApiJson(`/api/cards/${cardId}`, { method: 'DELETE' }).catch(() => {})
+      http.authedJson(`/api/cards/${cardId}`, { method: 'DELETE' }).catch(() => {})
     }
     return true
   }
@@ -2239,8 +2240,8 @@ export const useBoardStore = defineStore('board', () => {
     persist()
 
     if (remoteEnabled.value) {
-      userStore
-        .authedApiJson(`/api/cards/${cardId}/attachments`, {
+      http
+        .authedJson(`/api/cards/${cardId}/attachments`, {
           method: 'POST',
           body: {
             id: nextAttachment.id,
@@ -2266,7 +2267,7 @@ export const useBoardStore = defineStore('board', () => {
     persist()
 
     if (remoteEnabled.value) {
-      userStore.authedApiJson(`/api/attachments/${attachmentId}`, { method: 'DELETE' }).catch(() => {})
+      http.authedJson(`/api/attachments/${attachmentId}`, { method: 'DELETE' }).catch(() => {})
     }
   }
 

@@ -1,0 +1,10 @@
+{
+  email {$ACME_EMAIL}
+}
+
+{$DOMAIN} {
+  encode gzip
+
+  # Forward everything (including /api) to the internal nginx (web service)
+  reverse_proxy web:80
+}

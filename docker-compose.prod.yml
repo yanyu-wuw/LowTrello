@@ -1,0 +1,55 @@
+services:
+  # Production hardening: avoid exposing internal services.
+  postgres:
+    ports: []
+
+  api:
+    ports: []
+    environment:
+      # Ensure these are set in your .env on the server.
+      CORS_ORIGIN: ${CORS_ORIGIN}
+      JWT_SECRET: ${JWT_SECRET}
+      DATABASE_URL: ${DATABASE_URL}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_FROM: ${SMTP_FROM}
+
+      # Safer default: do not accept destructive schema pushes.
+      PRISMA_DB_PUSH: ${PRISMA_DB_PUSH:-1}
+      PRISMA_ACCEPT_DATA_LOSS: ${PRISMA_ACCEPT_DATA_LOSS:-0}
+
+    build:
+      args:
+        # VPS/CI usually doesn't have http.docker.internal proxy.
+        HTTP_PROXY: ""
+        HTTPS_PROXY: ""
+
+  mailhog:
+    # Optional in prod: keep for debugging, but don't expose UI publicly.
+    ports: []
+
+  web:
+    ports: []
+    build:
+      args:
+        HTTP_PROXY: ""
+        HTTPS_PROXY: ""
+
+  # Public entrypoint with automatic HTTPS (Let's Encrypt)
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: lowtrello-caddy
+    depends_on:
+      - web
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - lowtrello_caddy_data:/data
+      - lowtrello_caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  lowtrello_caddy_data:
+  lowtrello_caddy_config:

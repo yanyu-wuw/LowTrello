@@ -2,40 +2,11 @@ import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { createId } from '../utils/id'
 import { messages } from '../i18n/messages'
+import http, { configureAuthHandlers } from '../lib/http'
 import { loadFromStorage, loadString, saveString, saveToStorage } from '../utils/storage'
 
 const USER_KEY = 'lowtrello.user.v1'
 const LOCALE_KEY = 'lowtrello.locale.v1'
-
-async function readJsonSafely(response) {
-  try {
-    return await response.json()
-  } catch {
-    return null
-  }
-}
-
-async function apiJson(path, { method = 'GET', body, headers } = {}) {
-  const response = await fetch(path, {
-    method,
-    credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(headers || {})
-    },
-    body: body ? JSON.stringify(body) : undefined
-  })
-
-  if (response.ok) {
-    return await response.json()
-  }
-
-  const payload = await readJsonSafely(response)
-  const error = new Error(payload?.error || `HTTP_${response.status}`)
-  error.status = response.status
-  error.payload = payload
-  throw error
-}
 
 function createDefaultUser() {
   return {
@@ -92,6 +63,14 @@ export const useUserStore = defineStore('user', () => {
     })
   }
 
+  function clearSession() {
+    accessToken.value = ''
+    isAuthenticated.value = false
+    workspaces.value = []
+    currentWorkspaceId.value = ''
+    persistUser()
+  }
+
   function setSession({ accessToken: nextToken, user }, { remember = true } = {}) {
     accessToken.value = String(nextToken || '')
     isAuthenticated.value = Boolean(accessToken.value)
@@ -113,40 +92,6 @@ export const useUserStore = defineStore('user', () => {
     }
   }
 
-  async function authedApiJson(path, { method = 'GET', body, headers } = {}) {
-    const doFetch = async (token) => {
-      return await fetch(path, {
-        method,
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          ...(headers || {})
-        },
-        body: body ? JSON.stringify(body) : undefined
-      })
-    }
-
-    const token = String(accessToken.value || '')
-    let response = await doFetch(token)
-    if (response.status === 401 && token) {
-      const refreshed = await refreshAccessToken()
-      if (refreshed) {
-        response = await doFetch(String(accessToken.value || ''))
-      }
-    }
-
-    if (response.ok) {
-      return await response.json()
-    }
-
-    const payload = await readJsonSafely(response)
-    const error = new Error(payload?.error || `HTTP_${response.status}`)
-    error.status = response.status
-    error.payload = payload
-    throw error
-  }
-
   async function loadWorkspaces() {
     if (!isAuthenticated.value || !accessToken.value) {
       workspaces.value = []
@@ -154,7 +99,7 @@ export const useUserStore = defineStore('user', () => {
       return []
     }
 
-    const data = await authedApiJson('/api/workspaces')
+    const data = await http.authedJson('/api/workspaces')
     const list = Array.isArray(data) ? data : []
     workspaces.value = list
     const firstId = list?.[0]?.workspace?.id
@@ -195,7 +140,7 @@ export const useUserStore = defineStore('user', () => {
     }
 
     try {
-      const data = await apiJson('/api/auth/login', {
+      const data = await http.json('/api/auth/login', {
         method: 'POST',
         body: {
           email: trimmedEmail,
@@ -223,7 +168,7 @@ export const useUserStore = defineStore('user', () => {
     }
 
     try {
-      const data = await apiJson('/api/auth/register', {
+      const data = await http.json('/api/auth/register', {
         method: 'POST',
         body: {
           email: trimmedEmail,
@@ -252,7 +197,7 @@ export const useUserStore = defineStore('user', () => {
     }
 
     try {
-      const data = await apiJson('/api/auth/verify', {
+      const data = await http.json('/api/auth/verify', {
         method: 'POST',
         body: {
           email: trimmedEmail,
@@ -277,7 +222,7 @@ export const useUserStore = defineStore('user', () => {
     }
 
     try {
-      await apiJson('/api/auth/resend-code', {
+      await http.json('/api/auth/resend-code', {
         method: 'POST',
         body: {
           email: trimmedEmail
@@ -297,7 +242,7 @@ export const useUserStore = defineStore('user', () => {
     }
 
     try {
-      await apiJson('/api/auth/request-password-reset', {
+      await http.json('/api/auth/request-password-reset', {
         method: 'POST',
         body: {
           email: trimmedEmail
@@ -319,7 +264,7 @@ export const useUserStore = defineStore('user', () => {
     }
 
     try {
-      await apiJson('/api/auth/reset-password', {
+      await http.json('/api/auth/reset-password', {
         method: 'POST',
         body: {
           email: trimmedEmail,
@@ -338,7 +283,7 @@ export const useUserStore = defineStore('user', () => {
 
   async function refreshAccessToken() {
     try {
-      const data = await apiJson('/api/auth/refresh', {
+      const data = await http.json('/api/auth/refresh', {
         method: 'POST',
         body: {}
       })
@@ -347,9 +292,7 @@ export const useUserStore = defineStore('user', () => {
       return true
     } catch (error) {
       if (error?.status === 401) {
-        accessToken.value = ''
-        isAuthenticated.value = false
-        persistUser()
+        clearSession()
         return false
       }
 
@@ -391,16 +334,12 @@ export const useUserStore = defineStore('user', () => {
 
   async function logout() {
     try {
-      await apiJson('/api/auth/logout', { method: 'POST', body: {} })
+      await http.json('/api/auth/logout', { method: 'POST', body: {} })
     } catch {
       // ignore network errors on logout
     }
 
-    accessToken.value = ''
-    isAuthenticated.value = false
-    workspaces.value = []
-    currentWorkspaceId.value = ''
-    persistUser()
+    clearSession()
   }
 
   function setLocale(nextLocale) {
@@ -426,6 +365,14 @@ export const useUserStore = defineStore('user', () => {
     })
   }
 
+  // Bind auth handlers once the store is created (Pinia is ready).
+  // This lets the shared http module attach Bearer tokens and auto-refresh on 401.
+  configureAuthHandlers({
+    getAccessToken: () => String(accessToken.value || ''),
+    refreshAccessToken,
+    onUnauthorized: clearSession
+  })
+
   return {
     currentUser,
     members,
@@ -435,7 +382,6 @@ export const useUserStore = defineStore('user', () => {
     currentWorkspaceId,
     locale,
     t,
-    authedApiJson,
     loadWorkspaces,
     setLocale,
     loginWithEmail,
