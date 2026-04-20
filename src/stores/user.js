@@ -56,17 +56,26 @@ function getByPath(source, path) {
 }
 
 export const useUserStore = defineStore('user', () => {
+  // NOTE: accessToken must stay in-memory (Pinia) only.
+  // We still keep non-sensitive profile fields in localStorage for convenience.
   const savedUser = loadFromStorage(USER_KEY, {
-    isAuthenticated: false,
-    profile: createDefaultUser(),
-    accessToken: '',
-    persistAccessToken: true
+    profile: createDefaultUser()
   })
 
+  // Migration: older versions persisted accessToken/isAuthenticated in localStorage.
+  // Proactively wipe those fields so tokens are not left behind after upgrading.
+  if (savedUser && typeof savedUser === 'object' && typeof savedUser.accessToken === 'string' && savedUser.accessToken) {
+    saveToStorage(USER_KEY, {
+      profile: savedUser.profile || createDefaultUser()
+    })
+  }
+
   const currentUser = ref(savedUser?.profile || createDefaultUser())
-  const accessToken = ref(String(savedUser?.accessToken || ''))
-  const persistAccessToken = ref(Boolean(savedUser?.persistAccessToken))
-  const isAuthenticated = ref(Boolean(savedUser?.isAuthenticated && accessToken.value))
+  const accessToken = ref('')
+  const persistAccessToken = ref(false)
+  const isAuthenticated = ref(false)
+  const workspaces = ref([])
+  const currentWorkspaceId = ref('')
   const locale = ref(loadString(LOCALE_KEY, 'zh'))
   const restoreAttempted = ref(false)
   const restoreInFlight = ref(null)
@@ -79,16 +88,12 @@ export const useUserStore = defineStore('user', () => {
 
   function persistUser() {
     saveToStorage(USER_KEY, {
-      isAuthenticated: isAuthenticated.value,
-      profile: currentUser.value,
-      accessToken: persistAccessToken.value ? accessToken.value : '',
-      persistAccessToken: persistAccessToken.value
+      profile: currentUser.value
     })
   }
 
   function setSession({ accessToken: nextToken, user }, { remember = true } = {}) {
     accessToken.value = String(nextToken || '')
-    persistAccessToken.value = Boolean(remember)
     isAuthenticated.value = Boolean(accessToken.value)
 
     if (user && typeof user === 'object') {
@@ -101,6 +106,60 @@ export const useUserStore = defineStore('user', () => {
     }
 
     persistUser()
+
+    // Fire-and-forget: hydrate workspace context for board APIs.
+    if (isAuthenticated.value) {
+      loadWorkspaces().catch(() => {})
+    }
+  }
+
+  async function authedApiJson(path, { method = 'GET', body, headers } = {}) {
+    const doFetch = async (token) => {
+      return await fetch(path, {
+        method,
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...(headers || {})
+        },
+        body: body ? JSON.stringify(body) : undefined
+      })
+    }
+
+    const token = String(accessToken.value || '')
+    let response = await doFetch(token)
+    if (response.status === 401 && token) {
+      const refreshed = await refreshAccessToken()
+      if (refreshed) {
+        response = await doFetch(String(accessToken.value || ''))
+      }
+    }
+
+    if (response.ok) {
+      return await response.json()
+    }
+
+    const payload = await readJsonSafely(response)
+    const error = new Error(payload?.error || `HTTP_${response.status}`)
+    error.status = response.status
+    error.payload = payload
+    throw error
+  }
+
+  async function loadWorkspaces() {
+    if (!isAuthenticated.value || !accessToken.value) {
+      workspaces.value = []
+      currentWorkspaceId.value = ''
+      return []
+    }
+
+    const data = await authedApiJson('/api/workspaces')
+    const list = Array.isArray(data) ? data : []
+    workspaces.value = list
+    const firstId = list?.[0]?.workspace?.id
+    currentWorkspaceId.value = typeof firstId === 'string' ? firstId : ''
+    return list
   }
 
   function updateProfile(payload = {}) {
@@ -339,6 +398,8 @@ export const useUserStore = defineStore('user', () => {
 
     accessToken.value = ''
     isAuthenticated.value = false
+    workspaces.value = []
+    currentWorkspaceId.value = ''
     persistUser()
   }
 
@@ -370,8 +431,12 @@ export const useUserStore = defineStore('user', () => {
     members,
     isAuthenticated,
     accessToken,
+    workspaces,
+    currentWorkspaceId,
     locale,
     t,
+    authedApiJson,
+    loadWorkspaces,
     setLocale,
     loginWithEmail,
     loginWithPassword,

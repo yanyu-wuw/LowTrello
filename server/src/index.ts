@@ -7,6 +7,7 @@ import { healthRoutes } from './routes/health.js'
 import { authRoutes } from './routes/auth.js'
 import { workspaceRoutes } from './routes/workspaces.js'
 import { homeRoutes } from './routes/home.js'
+import { boardRoutes } from './routes/boards.js'
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -53,6 +54,7 @@ async function main() {
   await app.register(healthRoutes, { prefix: '/api' })
   await app.register(authRoutes, { prefix: '/api' })
   await app.register(workspaceRoutes, { prefix: '/api' })
+  await app.register(boardRoutes, { prefix: '/api' })
   await app.register(homeRoutes, { prefix: '/api' })
 
   await app.listen({ port: env.PORT, host: '0.0.0.0' })

@@ -58,17 +58,20 @@ function isHttps(req: any) {
   return proto === 'https' || req.protocol === 'https'
 }
 
-function setRefreshCookie(req: any, reply: any, refreshToken: string) {
+function setRefreshCookie(req: any, reply: any, refreshToken: string, expiresAt?: Date) {
   reply.setCookie(env.REFRESH_TOKEN_COOKIE_NAME, refreshToken, {
     httpOnly: true,
     sameSite: 'lax',
     secure: isHttps(req),
-    path: '/api/auth'
+    path: '/api/auth',
+    expires: expiresAt
   })
 }
 
-function clearRefreshCookie(reply: any) {
+function clearRefreshCookie(req: any, reply: any) {
   reply.clearCookie(env.REFRESH_TOKEN_COOKIE_NAME, {
+    sameSite: 'lax',
+    secure: isHttps(req),
     path: '/api/auth'
   })
 }
@@ -145,9 +148,9 @@ export async function authRoutes(app: FastifyInstance) {
     })
 
     const accessToken = signAccessToken({ sub: user.id, email: user.email, name: user.name })
-    const { refreshToken } = await issueRefreshToken(user.id)
+    const { refreshToken, record } = await issueRefreshToken(user.id)
 
-    setRefreshCookie(req, reply, refreshToken)
+    setRefreshCookie(req, reply, refreshToken, record.expiresAt)
     return reply.send({
       accessToken,
       user: { id: user.id, email: user.email, name: user.name }
@@ -207,9 +210,9 @@ export async function authRoutes(app: FastifyInstance) {
     })
 
     const accessToken = signAccessToken({ sub: updated.id, email: updated.email, name: updated.name })
-    const { refreshToken } = await issueRefreshToken(updated.id)
+    const { refreshToken, record } = await issueRefreshToken(updated.id)
 
-    setRefreshCookie(req, reply, refreshToken)
+    setRefreshCookie(req, reply, refreshToken, record.expiresAt)
     return reply.send({ accessToken, user: updated })
   })
 
@@ -297,25 +300,25 @@ export async function authRoutes(app: FastifyInstance) {
       }
     })
 
-    clearRefreshCookie(reply)
+    clearRefreshCookie(req, reply)
     return reply.send({ ok: true })
   })
 
   app.post('/auth/refresh', async (req, reply) => {
     const token = readRefreshToken(req)
     if (!token) {
-      clearRefreshCookie(reply)
+      clearRefreshCookie(req, reply)
       return reply.code(401).send({ error: 'UNAUTHORIZED' })
     }
 
     const rec = await findRefreshToken(token)
     if (!rec) {
-      clearRefreshCookie(reply)
+      clearRefreshCookie(req, reply)
       return reply.code(401).send({ error: 'UNAUTHORIZED' })
     }
 
     if (rec.expiresAt.getTime() <= Date.now()) {
-      clearRefreshCookie(reply)
+      clearRefreshCookie(req, reply)
       return reply.code(401).send({ error: 'UNAUTHORIZED' })
     }
 
@@ -323,7 +326,7 @@ export async function authRoutes(app: FastifyInstance) {
     // Invalidate all refresh tokens for that user to force re-login everywhere.
     if (rec.revokedAt) {
       await revokeAllRefreshTokensForUser(rec.userId)
-      clearRefreshCookie(reply)
+      clearRefreshCookie(req, reply)
       return reply.code(401).send({ error: 'UNAUTHORIZED' })
     }
 
@@ -333,12 +336,12 @@ export async function authRoutes(app: FastifyInstance) {
     })
 
     if (!user) {
-      clearRefreshCookie(reply)
+      clearRefreshCookie(req, reply)
       return reply.code(401).send({ error: 'UNAUTHORIZED' })
     }
 
     if (!user.emailVerified) {
-      clearRefreshCookie(reply)
+      clearRefreshCookie(req, reply)
       return reply.code(401).send({ error: 'UNAUTHORIZED' })
     }
 
@@ -346,7 +349,7 @@ export async function authRoutes(app: FastifyInstance) {
     await revokeRefreshTokenById(rec.id, newRec.id)
 
     const accessToken = signAccessToken({ sub: user.id, email: user.email, name: user.name })
-    setRefreshCookie(req, reply, newRefreshToken)
+    setRefreshCookie(req, reply, newRefreshToken, newRec.expiresAt)
 
     return reply.send({ accessToken, user })
   })
@@ -358,7 +361,7 @@ export async function authRoutes(app: FastifyInstance) {
       if (rec && !rec.revokedAt) await revokeRefreshTokenById(rec.id)
     }
 
-    clearRefreshCookie(reply)
+    clearRefreshCookie(req, reply)
     return reply.send({ ok: true })
   })
 }

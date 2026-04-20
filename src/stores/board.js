@@ -1,8 +1,9 @@
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
 import { createId } from '../utils/id'
 import { loadFromStorage, loadString, saveString, saveToStorage } from '../utils/storage'
 import { normalizeBoardBackground } from '../utils/boardBackgrounds'
+import { useUserStore } from './user'
 
 const BOARDS_KEY = 'lowtrello.boards.v1'
 const CURRENT_BOARD_KEY = 'lowtrello.current_board_id.v1'
@@ -779,11 +780,186 @@ function createDefaultBoard() {
 }
 
 export const useBoardStore = defineStore('board', () => {
+  const userStore = useUserStore()
   const boards = ref([])
   const currentBoardId = ref('')
   const initialized = ref(false)
 
+  const remoteEnabled = computed(() => Boolean(userStore.isAuthenticated && userStore.accessToken))
+  const remoteLoading = ref(false)
+  const remoteLoadedOnce = ref(false)
+  const reorderTimer = ref(null)
+  const reorderPendingBoardId = ref('')
+
   const currentBoard = computed(() => boards.value.find((board) => board.id === currentBoardId.value) || null)
+
+  async function ensureWorkspaceId() {
+    const existing = String(userStore.currentWorkspaceId || '').trim()
+    if (existing) return existing
+    try {
+      await userStore.loadWorkspaces()
+    } catch {
+      // ignore
+    }
+    return String(userStore.currentWorkspaceId || '').trim()
+  }
+
+  function pickLocalBoardMeta(boardId) {
+    const local = boards.value.find((b) => b.id === boardId) || null
+    return local && typeof local === 'object' ? local : null
+  }
+
+  function mergeCardMeta(serverCard, localCard) {
+    if (!serverCard || typeof serverCard !== 'object') return serverCard
+    if (!localCard || typeof localCard !== 'object') return serverCard
+
+    return {
+      ...serverCard,
+      labelIds: Array.isArray(localCard.labelIds) ? localCard.labelIds : serverCard.labelIds,
+      assignees: Array.isArray(localCard.assignees) ? localCard.assignees : serverCard.assignees,
+      checklist: Array.isArray(localCard.checklist) ? localCard.checklist : serverCard.checklist,
+      comments: Array.isArray(localCard.comments) ? localCard.comments : serverCard.comments,
+      activity: Array.isArray(localCard.activity) ? localCard.activity : serverCard.activity,
+      automationMeta: localCard.automationMeta && typeof localCard.automationMeta === 'object'
+        ? localCard.automationMeta
+        : serverCard.automationMeta
+    }
+  }
+
+  function mergeBoardMeta(serverBoard) {
+    const localBoard = pickLocalBoardMeta(serverBoard?.id)
+    if (!localBoard) return serverBoard
+
+    const mergeLists = (serverLists, localLists) => {
+      if (!Array.isArray(serverLists)) return serverLists
+      const localMap = new Map(
+        Array.isArray(localLists)
+          ? localLists.map((l) => [l.id, l])
+          : []
+      )
+
+      return serverLists.map((list) => {
+        const localList = localMap.get(list.id)
+        const localCardMap = new Map(
+          Array.isArray(localList?.cards)
+            ? localList.cards.map((c) => [c.id, c])
+            : []
+        )
+
+        return {
+          ...list,
+          cards: Array.isArray(list.cards)
+            ? list.cards.map((c) => mergeCardMeta(c, localCardMap.get(c.id)))
+            : list.cards
+        }
+      })
+    }
+
+    return {
+      ...serverBoard,
+      ownerEmail: typeof localBoard.ownerEmail === 'string' ? localBoard.ownerEmail : serverBoard.ownerEmail,
+      members: Array.isArray(localBoard.members) ? localBoard.members : serverBoard.members,
+      labels: Array.isArray(localBoard.labels) ? localBoard.labels : serverBoard.labels,
+      automation: localBoard.automation && typeof localBoard.automation === 'object' ? localBoard.automation : serverBoard.automation,
+      integrations: localBoard.integrations && typeof localBoard.integrations === 'object' ? localBoard.integrations : serverBoard.integrations,
+      activity: Array.isArray(localBoard.activity) ? localBoard.activity : serverBoard.activity,
+      lists: mergeLists(serverBoard.lists, localBoard.lists),
+      archivedLists: mergeLists(serverBoard.archivedLists, localBoard.archivedLists),
+      archivedCards: Array.isArray(serverBoard.archivedCards)
+        ? serverBoard.archivedCards.map((entry) => {
+            const localEntry = Array.isArray(localBoard.archivedCards)
+              ? localBoard.archivedCards.find((e) => e?.id === entry?.id)
+              : null
+            const localCard = localEntry?.card
+            return {
+              ...entry,
+              card: mergeCardMeta(entry.card, localCard)
+            }
+          })
+        : serverBoard.archivedCards
+    }
+  }
+
+  async function loadRemoteBoards() {
+    if (!remoteEnabled.value) return false
+    if (remoteLoading.value) return false
+
+    const workspaceId = await ensureWorkspaceId()
+    if (!workspaceId) return false
+
+    remoteLoading.value = true
+    try {
+      const data = await userStore.authedApiJson(`/api/workspaces/${workspaceId}/boards`)
+      const items = Array.isArray(data?.items) ? data.items : []
+
+      // Bootstrap: keep UX consistent with the local prototype (at least 1 board).
+      if (!items.length) {
+        const boardId = createId('board')
+        const payload = {
+          id: boardId,
+          title: localizedText('boardTitle'),
+          description: localizedText('boardDescription'),
+          visibility: 'workspace',
+          lists: [
+            { id: createId('list'), title: localizedText('todo'), position: 0 },
+            { id: createId('list'), title: localizedText('doing'), position: 1 },
+            { id: createId('list'), title: localizedText('done'), position: 2 }
+          ]
+        }
+        await userStore.authedApiJson(`/api/workspaces/${workspaceId}/boards`, { method: 'POST', body: payload })
+        const again = await userStore.authedApiJson(`/api/workspaces/${workspaceId}/boards`)
+        const nextItems = Array.isArray(again?.items) ? again.items : []
+        boards.value = nextItems.map((b) => normalizeBoard(mergeBoardMeta(b)))
+      } else {
+        boards.value = items.map((b) => normalizeBoard(mergeBoardMeta(b)))
+      }
+
+      const savedBoardId = loadString(CURRENT_BOARD_KEY, '')
+      const hasSavedBoard = boards.value.some((board) => board.id === savedBoardId)
+      currentBoardId.value = hasSavedBoard ? savedBoardId : boards.value[0]?.id || ''
+      persist()
+      remoteLoadedOnce.value = true
+      return true
+    } catch {
+      return false
+    } finally {
+      remoteLoading.value = false
+    }
+  }
+
+  function scheduleRemoteReorder(boardId = currentBoardId.value) {
+    if (!remoteEnabled.value) return
+    const id = String(boardId || '').trim()
+    if (!id) return
+
+    reorderPendingBoardId.value = id
+    if (reorderTimer.value) {
+      clearTimeout(reorderTimer.value)
+    }
+
+    reorderTimer.value = setTimeout(() => {
+      const targetBoard = findBoard(reorderPendingBoardId.value)
+      if (!targetBoard) return
+
+      const lists = Array.isArray(targetBoard.lists)
+        ? targetBoard.lists.map((l, idx) => ({ id: l.id, position: idx }))
+        : []
+
+      const cards = []
+      ;(targetBoard.lists || []).forEach((l) => {
+        ;(l.cards || []).forEach((c, idx) => {
+          cards.push({ id: c.id, listId: l.id, position: idx })
+        })
+      })
+
+      userStore
+        .authedApiJson(`/api/boards/${targetBoard.id}/reorder`, {
+          method: 'POST',
+          body: { lists, cards }
+        })
+        .catch(() => {})
+    }, 250)
+  }
 
   function persist() {
     saveToStorage(BOARDS_KEY, boards.value)
@@ -797,6 +973,7 @@ export const useBoardStore = defineStore('board', () => {
     }
 
     persist()
+    scheduleRemoteReorder(currentBoardId.value)
   }
 
   function init() {
@@ -815,7 +992,32 @@ export const useBoardStore = defineStore('board', () => {
 
     persist()
     initialized.value = true
+
+    // If authenticated, switch to server-backed boards.
+    if (remoteEnabled.value) {
+      loadRemoteBoards().catch(() => {})
+    }
   }
+
+  watch(
+    remoteEnabled,
+    (enabled) => {
+      if (enabled) {
+        loadRemoteBoards().catch(() => {})
+      } else if (remoteLoadedOnce.value) {
+        // Fallback to local cached boards when logging out.
+        const rawBoards = loadFromStorage(BOARDS_KEY, [])
+        boards.value = Array.isArray(rawBoards) && rawBoards.length
+          ? rawBoards.map((item) => normalizeBoard(item))
+          : [createDefaultBoard()]
+        const savedBoardId = loadString(CURRENT_BOARD_KEY, '')
+        const hasSavedBoard = boards.value.some((board) => board.id === savedBoardId)
+        currentBoardId.value = hasSavedBoard ? savedBoardId : boards.value[0]?.id || ''
+        persist()
+      }
+    },
+    { immediate: false }
+  )
 
   function setCurrentBoard(boardId) {
     if (!boards.value.some((board) => board.id === boardId)) {
@@ -1212,6 +1414,56 @@ export const useBoardStore = defineStore('board', () => {
     boards.value.unshift(nextBoard)
     currentBoardId.value = nextBoard.id
     persist()
+
+    if (remoteEnabled.value) {
+      const send = (workspaceId) => {
+        const wid = String(workspaceId || '').trim()
+        if (!wid) return
+
+        const listsPayload = Array.isArray(nextBoard.lists)
+          ? nextBoard.lists.map((l, idx) => ({
+              id: l.id,
+              title: l.title,
+              position: idx,
+              cards: Array.isArray(l.cards)
+                ? l.cards.map((c, cIdx) => ({
+                    id: c.id,
+                    title: c.title,
+                    description: c.description || '',
+                    position: cIdx,
+                    dueDate: c.dueDate || ''
+                  }))
+                : []
+            }))
+          : []
+
+        userStore
+          .authedApiJson(`/api/workspaces/${wid}/boards`, {
+            method: 'POST',
+            body: {
+              id: nextBoard.id,
+              title: nextBoard.title,
+              description: nextBoard.description || '',
+              visibility: nextBoard.visibility,
+              background: nextBoard.background,
+              lists: listsPayload
+            }
+          })
+          .then(() => loadRemoteBoards())
+          .catch(() => {})
+      }
+
+      const existingWorkspaceId = String(userStore.currentWorkspaceId || '').trim()
+      if (existingWorkspaceId) {
+        send(existingWorkspaceId)
+      } else {
+        userStore
+          .loadWorkspaces()
+          .then(() => send(String(userStore.currentWorkspaceId || '').trim()))
+          .catch(() => {})
+      }
+    }
+
     return nextBoard
   }
 
@@ -1281,6 +1533,18 @@ export const useBoardStore = defineStore('board', () => {
     }
 
     persist()
+
+    if (remoteEnabled.value) {
+      const body = {}
+      if (typeof payload.title === 'string') body.title = board.title
+      if (typeof payload.description === 'string') body.description = board.description
+      if (typeof payload.visibility === 'string') body.visibility = board.visibility
+      if (payload.background && typeof payload.background === 'object') body.background = board.background
+
+      if (Object.keys(body).length) {
+        userStore.authedApiJson(`/api/boards/${boardId}`, { method: 'PATCH', body }).catch(() => {})
+      }
+    }
   }
 
   function deleteBoard(boardId) {
@@ -1295,6 +1559,13 @@ export const useBoardStore = defineStore('board', () => {
     }
 
     persist()
+
+    if (remoteEnabled.value) {
+      userStore
+        .authedApiJson(`/api/boards/${boardId}`, { method: 'DELETE' })
+        .then(() => loadRemoteBoards())
+        .catch(() => {})
+    }
   }
 
   function addList(boardId, title) {
@@ -1318,6 +1589,16 @@ export const useBoardStore = defineStore('board', () => {
     })
     touchBoard(board)
     persist()
+
+    if (remoteEnabled.value) {
+      const position = Math.max(0, board.lists.length - 1)
+      userStore
+        .authedApiJson(`/api/boards/${boardId}/lists`, {
+          method: 'POST',
+          body: { id: nextList.id, title: nextList.title, position }
+        })
+        .catch(() => {})
+    }
     return nextList
   }
 
@@ -1370,6 +1651,29 @@ export const useBoardStore = defineStore('board', () => {
     listResult.board.lists.splice(sourceIndex + 1, 0, nextList)
     touchBoard(listResult.board)
     persist()
+
+    if (remoteEnabled.value) {
+      const position = Math.max(0, sourceIndex + 1)
+      userStore
+        .authedApiJson(`/api/boards/${boardId}/lists`, {
+          method: 'POST',
+          body: {
+            id: nextList.id,
+            title: nextList.title,
+            position,
+            cards: Array.isArray(nextList.cards)
+              ? nextList.cards.map((c, idx) => ({
+                  id: c.id,
+                  title: c.title,
+                  description: c.description || '',
+                  position: idx,
+                  dueDate: c.dueDate || ''
+                }))
+              : []
+          }
+        })
+        .catch(() => {})
+    }
     return nextList
   }
 
@@ -1424,6 +1728,10 @@ export const useBoardStore = defineStore('board', () => {
     })
     touchBoard(board)
     persist()
+
+    if (remoteEnabled.value) {
+      userStore.authedApiJson(`/api/lists/${listId}`, { method: 'PATCH', body: { archived: true } }).catch(() => {})
+    }
     return nextList
   }
 
@@ -1457,6 +1765,10 @@ export const useBoardStore = defineStore('board', () => {
     })
     touchBoard(board)
     persist()
+
+    if (remoteEnabled.value) {
+      userStore.authedApiJson(`/api/lists/${listId}`, { method: 'PATCH', body: { archived: false } }).catch(() => {})
+    }
     return nextList
   }
 
@@ -1483,6 +1795,10 @@ export const useBoardStore = defineStore('board', () => {
 
     touchBoard(board)
     persist()
+
+    if (remoteEnabled.value) {
+      userStore.authedApiJson(`/api/lists/${listId}`, { method: 'DELETE' }).catch(() => {})
+    }
     return true
   }
 
@@ -1495,6 +1811,15 @@ export const useBoardStore = defineStore('board', () => {
     listResult.list.title = String(title || '').trim() || listResult.list.title
     touchBoard(listResult.board)
     persist()
+
+    if (remoteEnabled.value) {
+      userStore
+        .authedApiJson(`/api/lists/${listId}`, {
+          method: 'PATCH',
+          body: { title: listResult.list.title }
+        })
+        .catch(() => {})
+    }
   }
 
   function deleteList(boardId, listId) {
@@ -1506,6 +1831,10 @@ export const useBoardStore = defineStore('board', () => {
     board.lists = board.lists.filter((list) => list.id !== listId)
     touchBoard(board)
     persist()
+
+    if (remoteEnabled.value) {
+      userStore.authedApiJson(`/api/lists/${listId}`, { method: 'DELETE' }).catch(() => {})
+    }
   }
 
   function addCard(boardId, listId, payload = {}) {
@@ -1542,6 +1871,21 @@ export const useBoardStore = defineStore('board', () => {
     touchCardAndBoard(listResult.board, nextCard)
     runAutomationForCard(listResult.board, listResult.list, nextCard)
     persist()
+
+    if (remoteEnabled.value) {
+      userStore
+        .authedApiJson(`/api/lists/${listId}/cards`, {
+          method: 'POST',
+          body: {
+            id: nextCard.id,
+            title: nextCard.title,
+            description: nextCard.description || '',
+            position: 0,
+            dueDate: nextCard.dueDate || ''
+          }
+        })
+        .catch(() => {})
+    }
     return nextCard
   }
 
@@ -1620,6 +1964,20 @@ export const useBoardStore = defineStore('board', () => {
     runAutomationForCard(cardResult.board, cardResult.list, cardResult.card)
 
     persist()
+
+    if (remoteEnabled.value) {
+      const body = {}
+      if (typeof payload.title === 'string') body.title = cardResult.card.title
+      if (typeof payload.description === 'string') body.description = cardResult.card.description
+      if (typeof payload.dueDate === 'string') body.dueDate = cardResult.card.dueDate
+      if (typeof payload.archived === 'boolean') body.archived = payload.archived
+      if (typeof payload.listId === 'string') body.listId = payload.listId
+      if (typeof payload.position === 'number') body.position = payload.position
+
+      if (Object.keys(body).length) {
+        userStore.authedApiJson(`/api/cards/${cardId}`, { method: 'PATCH', body }).catch(() => {})
+      }
+    }
   }
 
   function deleteCard(boardId, listId, cardId) {
@@ -1643,6 +2001,10 @@ export const useBoardStore = defineStore('board', () => {
     }
     touchBoard(listResult.board)
     persist()
+
+    if (remoteEnabled.value) {
+      userStore.authedApiJson(`/api/cards/${cardId}`, { method: 'DELETE' }).catch(() => {})
+    }
   }
 
   function archiveCard(boardId, listId, cardId) {
@@ -1688,6 +2050,10 @@ export const useBoardStore = defineStore('board', () => {
 
     touchBoard(cardResult.board)
     persist()
+
+    if (remoteEnabled.value) {
+      userStore.authedApiJson(`/api/cards/${cardId}`, { method: 'PATCH', body: { archived: true } }).catch(() => {})
+    }
     return entry
   }
 
@@ -1753,6 +2119,15 @@ export const useBoardStore = defineStore('board', () => {
 
     touchBoard(board)
     persist()
+
+    if (remoteEnabled.value) {
+      userStore
+        .authedApiJson(`/api/cards/${cardId}`, {
+          method: 'PATCH',
+          body: { archived: false, listId: targetList.id, position: 0 }
+        })
+        .catch(() => {})
+    }
     return {
       card: nextCard,
       listId: targetList.id
@@ -1783,6 +2158,10 @@ export const useBoardStore = defineStore('board', () => {
 
     touchBoard(board)
     persist()
+
+    if (remoteEnabled.value) {
+      userStore.authedApiJson(`/api/cards/${cardId}`, { method: 'DELETE' }).catch(() => {})
+    }
     return true
   }
 
@@ -1858,6 +2237,21 @@ export const useBoardStore = defineStore('board', () => {
     touchCardAndBoard(cardResult.board, cardResult.card)
     runAutomationForCard(cardResult.board, cardResult.list, cardResult.card)
     persist()
+
+    if (remoteEnabled.value) {
+      userStore
+        .authedApiJson(`/api/cards/${cardId}/attachments`, {
+          method: 'POST',
+          body: {
+            id: nextAttachment.id,
+            name: nextAttachment.name,
+            url: nextAttachment.url,
+            type: nextAttachment.type,
+            size: nextAttachment.size
+          }
+        })
+        .catch(() => {})
+    }
     return nextAttachment
   }
 
@@ -1870,6 +2264,10 @@ export const useBoardStore = defineStore('board', () => {
     cardResult.card.attachments = cardResult.card.attachments.filter((item) => item.id !== attachmentId)
     touchCardAndBoard(cardResult.board, cardResult.card)
     persist()
+
+    if (remoteEnabled.value) {
+      userStore.authedApiJson(`/api/attachments/${attachmentId}`, { method: 'DELETE' }).catch(() => {})
+    }
   }
 
   function setCardAssignees(boardId, listId, cardId, assignees = []) {
